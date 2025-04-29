@@ -6,6 +6,29 @@ import pandas as pd
 from distributed import Client, LocalCluster
 from arboreto.core import create_graph, SGBM_KWARGS, RF_KWARGS, EARLY_STOP_WINDOW_LENGTH
 
+def grnboost2_fdr(
+        expression_data,
+        input_grn,
+        num_non_tf_clusters,
+        num_tf_clusters,
+        cluster_representative_mode,
+        tf_names='all',
+        client_or_address='local',
+        early_stop_window_length=EARLY_STOP_WINDOW_LENGTH,
+        limit=None,
+        seed=None,
+        verbose=False
+):
+
+    if cluster_representative_mode not in {'medoid', 'random', 'all_genes'}:
+        raise ValueError('cluster_representative_mode must be one of "medoid", "random", "all_genes"')
+
+    # Todo
+
+    return
+
+
+
 
 def grnboost2(expression_data,
               gene_names=None,
