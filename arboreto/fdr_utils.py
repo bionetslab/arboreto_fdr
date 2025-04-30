@@ -1,7 +1,9 @@
 
 import pandas as pd
 import numpy as np
+
 from numba import njit, prange, set_num_threads, types
+from sklearn.cluster import AgglomerativeClustering
 
 
 @njit(nopython=True, nogil=True)
@@ -29,7 +31,7 @@ def _merge_sorted_arrays(a: np.ndarray, b: np.ndarray) -> np.ndarray:
 
 
 @njit(nopython=True, parallel=True, nogil=True)
-def _pairwise_wasserstein_dists(sorted_matrix, num_threads):
+def _pairwise_wasserstein_dists(sorted_matrix: np.ndarray, num_threads: int) -> np.ndarray:
     """
     Compute the pairwise 1D Wasserstein distances between all columns of a sorted matrix.
 
@@ -65,7 +67,7 @@ def _pairwise_wasserstein_dists(sorted_matrix, num_threads):
     return distance_mat
 
 
-def compute_wasserstein_distance_matrix(expression_mat : pd.DataFrame, num_threads: int = -1):
+def compute_wasserstein_distance_matrix(expression_mat: pd.DataFrame, num_threads: int = -1) -> np.ndarray:
     """
     Compute the pairwise 1D Wasserstein distance matrix between columns of a gene expression matrix.
 
@@ -84,4 +86,20 @@ def compute_wasserstein_distance_matrix(expression_mat : pd.DataFrame, num_threa
     return distance_mat
 
 
+def cluster_genes_to_dict(distance_matrix : pd.DataFrame, num_clusters : int = 100) -> dict[str, int]:
+    """
+    Perform agglomerative clustering on a precomputed distance matrix and return gene-to-cluster mappings.
+
+    :param distance_matrix: a symmetric pandas DataFrame representing pairwise distances between genes.
+                            It is assumed to be precomputed (e.g., Wasserstein distances).
+    :param num_clusters: the number of clusters to form.
+    :return: a dictionary mapping gene names (column names in the distance matrix) to cluster IDs.
+    """
+    # Create clusters.
+    agg_clustering = AgglomerativeClustering(n_clusters=num_clusters, metric='precomputed', linkage='complete')
+    cluster_labels = agg_clustering.fit_predict(distance_matrix.to_numpy())
+    # Map clustering output to dictionary representation.
+    gene_names = distance_matrix.columns.to_list()
+    gene_to_cluster = {name : id for name, id in zip(gene_names, cluster_labels)}
+    return gene_to_cluster
 
