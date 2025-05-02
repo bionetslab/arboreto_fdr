@@ -4,7 +4,7 @@ import numpy as np
 
 from numba import njit, prange, set_num_threads, types
 from sklearn.cluster import AgglomerativeClustering
-
+from distributed import Client, LocalCluster
 
 @njit(nopython=True, nogil=True)
 def _merge_sorted_arrays(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -67,7 +67,7 @@ def _pairwise_wasserstein_dists(sorted_matrix: np.ndarray, num_threads: int) -> 
     return distance_mat
 
 
-def compute_wasserstein_distance_matrix(expression_mat: pd.DataFrame, num_threads: int = -1) -> np.ndarray:
+def compute_wasserstein_distance_matrix(expression_mat: pd.DataFrame, num_threads: int = -1) -> pd.DataFrame:
     """
     Compute the pairwise 1D Wasserstein distance matrix between columns of a gene expression matrix.
 
@@ -103,3 +103,185 @@ def cluster_genes_to_dict(distance_matrix : pd.DataFrame, num_clusters : int = 1
     gene_to_cluster = {name : id for name, id in zip(gene_names, cluster_labels)}
     return gene_to_cluster
 
+def merge_gene_clusterings(clustering1 : dict, clustering2 : dict):
+    num_clusters1 = max({clusterID for _, clusterID in clustering1.items()})+1
+    updated_clustering2 = {gene : clusterID+num_clusters1 for gene, clusterID in clustering2.items()}
+    return clustering1 | updated_clustering2
+
+def compute_medoids(gene_to_cluster : dict, distance_matrix : pd.DataFrame):
+    medoids = []
+    clusters = set(gene_to_cluster.values())
+    for cluster in clusters:
+        # Retrieve genes in current cluster.
+        cluster_genes = [gene for gene, c in gene_to_cluster.items() if c==cluster]
+        # Extract cluster sub-distance matrix.
+        cluster_bool = [True if gene in cluster_genes else False for gene in distance_matrix.columns]
+        sub_matrix = distance_matrix.loc[cluster_bool, cluster_bool]
+        # Compute average distance for each gene to remaining ones in cluster.
+        avg_distances = sub_matrix.mean(axis=0)
+        # Medoid is gene with the minimal average distance.
+        medoid_gene = avg_distances.idxmin()
+        medoids.append(medoid_gene)
+
+    return medoids
+
+def partition_input_grn(input_grn, clustering_dict):
+    grn_subsets = dict()
+    genes_per_cluster = dict()
+    for (tf, target), val in input_grn.items():
+        target_cluster = clustering_dict[target]
+        if target_cluster in grn_subsets:
+            grn_subsets[target_cluster].update({(tf, target): val})
+            genes_per_cluster[target_cluster].add(target)
+        else:
+            grn_subsets[target_cluster] = {(tf, target): val}
+            genes_per_cluster[target_cluster] = {target}
+    genes_per_cluster = {cluster : list(genes) for cluster, genes in genes_per_cluster.items()}
+    return grn_subsets, genes_per_cluster
+
+def invert_tf_to_cluster_dict(tf_representatives : list[str],
+                              gene_to_cluster : dict[str, int]):
+    """
+    Computes per cluster list of corresponding TFs names.
+    Args:
+        tf_representatives: List of TF names as strings.
+        gene_to_cluster: Whole clustering of all input genes.
+
+    Returns:
+        Dict with cluster ID as key and list of TF names as values.
+    """
+    cluster_to_tf = dict()
+    # Subset and invert gene-cluster dict to only contain TFs.
+    for gene, cluster in gene_to_cluster.items():
+        if gene in tf_representatives:
+            if not cluster in cluster_to_tf:
+                cluster_to_tf[cluster] = []
+            cluster_to_tf[cluster].append(gene)
+    return cluster_to_tf
+
+def subset_tf_matrix(tf_matrix : np.ndarray,
+                      tf_gene_names : list[str],
+                      tf_subset_names : list[str]):
+    tf_subset_indices = [index for index, tf in enumerate(tf_gene_names) if tf in tf_subset_names]
+    tf_subset_matrix = tf_matrix[:, tf_subset_indices]
+    tf_subset_names = [tf for tf in tf_gene_names if tf in tf_subset_names]
+    return tf_subset_matrix, tf_subset_names
+
+def count_helper(
+        shuffled_grn: pd.DataFrame,
+        partial_input_grn: dict[str, dict[str, float]],
+        gene_to_clust: dict[str, int],
+) -> None:
+    """
+    Computes empirical counts for all edges in input GRN based on given decoy edges.
+    Args:
+        shuffled_grn: Decoy edges based on shuffled expression matrix.
+        partial_input_grn: "Groundtruth" edges from input GRN.
+        gene_to_clust: Clustering of genes, with gene names as keys and cluster IDs as values.
+
+    Returns: None. Partial_input_GRN is updated in-place.
+    """
+
+    # {id of cluster of TF: importance}
+    # Note that each TF-cluster-ID (i.e. key in the following dict) still only occurs exactly once, since either
+    # TFs have not been clustered (i.e. each TF has one dummy cluster) or if TFs have been clustered, then
+    # each TF cluster has exactly one representative and hence can only appear once in shuffled output GRN.
+    shuffled_grn_tf_cluster_to_importance = {
+        gene_to_clust[tf]: imp for tf, imp in zip(shuffled_grn['TF'], shuffled_grn['importance'])
+    }
+
+    for (tf, _), val in partial_input_grn.items():
+        if gene_to_clust[tf] in shuffled_grn_tf_cluster_to_importance:
+            importance_input = val['importance']
+            importance_shuffled = shuffled_grn_tf_cluster_to_importance[gene_to_clust[tf]]
+
+            if importance_shuffled >= importance_input:
+                val['count'] += 1
+
+def _prepare_client(client_or_address):
+    """
+    :param client_or_address: one of:
+           * None
+           * verbatim: 'local'
+           * string address
+           * a Client instance
+    :return: a tuple: (Client instance, shutdown callback function).
+    :raises: ValueError if no valid client input was provided.
+    """
+
+    if client_or_address is None or str(client_or_address).lower() == 'local':
+        local_cluster = LocalCluster(diagnostics_port=None)
+        client = Client(local_cluster)
+
+        def close_client_and_local_cluster(verbose=False):
+            if verbose:
+                print('shutting down client and local cluster')
+
+            client.close()
+            local_cluster.close()
+
+        return client, close_client_and_local_cluster
+
+    elif isinstance(client_or_address, str) and client_or_address.lower() != 'local':
+        client = Client(client_or_address)
+
+        def close_client(verbose=False):
+            if verbose:
+                print('shutting down client')
+
+            client.close()
+
+        return client, close_client
+
+    elif isinstance(client_or_address, Client):
+
+        def close_dummy(verbose=False):
+            if verbose:
+                print('not shutting down client, client was created externally')
+
+            return None
+
+        return client_or_address, close_dummy
+
+    else:
+        raise ValueError("Invalid client specified {}".format(str(client_or_address)))
+
+
+def _prepare_input(expression_data,
+                   gene_names,
+                   tf_names):
+    """
+    Wrangle the inputs into the correct formats.
+
+    :param expression_data: one of:
+                            * a pandas DataFrame (rows=observations, columns=genes)
+                            * a dense 2D numpy.ndarray
+                            * a sparse scipy.sparse.csc_matrix
+    :param gene_names: optional list of gene names (strings).
+                       Required when a (dense or sparse) matrix is passed as 'expression_data' instead of a DataFrame.
+    :param tf_names: optional list of transcription factors. If None or 'all', the list of gene_names will be used.
+    :return: a triple of:
+             1. a np.ndarray or scipy.sparse.csc_matrix
+             2. a list of gene name strings
+             3. a list of transcription factor name strings.
+    """
+
+    if isinstance(expression_data, pd.DataFrame):
+        expression_matrix = expression_data.to_numpy()
+        gene_names = list(expression_data.columns)
+    else:
+        expression_matrix = expression_data
+        assert expression_matrix.shape[1] == len(gene_names)
+
+    if tf_names is None:
+        tf_names = gene_names
+    elif tf_names == 'all':
+        tf_names = gene_names
+    else:
+        if len(tf_names) == 0:
+            raise ValueError('Specified tf_names is empty')
+
+        if not set(gene_names).intersection(set(tf_names)):
+            raise ValueError('Intersection of gene_names and tf_names is empty.')
+
+    return expression_matrix, gene_names, tf_names

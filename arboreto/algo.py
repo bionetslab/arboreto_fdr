@@ -5,29 +5,55 @@ Top-level functions.
 import pandas as pd
 from distributed import Client, LocalCluster
 from arboreto.core import create_graph, SGBM_KWARGS, RF_KWARGS, EARLY_STOP_WINDOW_LENGTH
+from arboreto.fdr import perform_fdr
 
 def grnboost2_fdr(
+        expression_data : pd.DataFrame,
+        tf_names : list[str],
+        num_non_tf_clusters : int,
+        cluster_representative_mode : str,
+        num_tf_clusters : int = -1,
+        input_grn : dict = None,
+        client_or_address='local',
+        early_stop_window_length=EARLY_STOP_WINDOW_LENGTH,
+        seed=None,
+        verbose=False,
+        num_permutations=1000
+):
+    if cluster_representative_mode not in {'medoid', 'random', 'all_genes'}:
+        raise ValueError('cluster_representative_mode must be one of "medoid", "random", "all_genes"')
+
+    if num_non_tf_clusters < 1:
+        raise ValueError('Number of TF and non-TF clusters needs to be at least 1.')
+
+    if verbose and num_tf_clusters == -1:
+        print("running FDR without TF clustering")
+
+    # If input GRN has not been given, run one GRNBoost inference call upfront and transform into necessary
+    # dictionary-based format.
+    if input_grn is None:
+        input_grn_df = grnboost2(
+            expression_data=expression_data,
+            tf_names=tf_names,
+            client_or_address=client_or_address
+        )
+        input_grn = dict()
+        for tf, target, importance in zip(input_grn_df['TF'], input_grn_df['target'], input_grn_df['importance']):
+            input_grn[(tf, target)] = {'importance': importance}
+
+    return perform_fdr(
         expression_data,
         input_grn,
         num_non_tf_clusters,
         num_tf_clusters,
         cluster_representative_mode,
-        tf_names='all',
-        client_or_address='local',
-        early_stop_window_length=EARLY_STOP_WINDOW_LENGTH,
-        limit=None,
-        seed=None,
-        verbose=False
-):
-
-    if cluster_representative_mode not in {'medoid', 'random', 'all_genes'}:
-        raise ValueError('cluster_representative_mode must be one of "medoid", "random", "all_genes"')
-
-    # Todo
-
-    return
-
-
+        tf_names,
+        client_or_address,
+        early_stop_window_length,
+        seed,
+        verbose,
+        num_permutations
+    )
 
 
 def grnboost2(expression_data,
