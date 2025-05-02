@@ -1,10 +1,14 @@
+from html.parser import piclose
+
 from arboreto.core import EARLY_STOP_WINDOW_LENGTH, SGBM_KWARGS, DEMON_SEED, to_tf_matrix, target_gene_indices, clean, fit_model, to_links_df
 from arboreto.fdr_utils import compute_wasserstein_distance_matrix, cluster_genes_to_dict, merge_gene_clusterings, compute_medoids, partition_input_grn, invert_tf_to_cluster_dict, count_helper, subset_tf_matrix, _prepare_client, _prepare_input
 import numpy as np
 import pandas as pd
-from dask import delayed
+from dask import delayed, compute
 from dask.dataframe import from_delayed
 from dask.dataframe.utils import make_meta
+import pickle
+import os
 
 FDR_GRN_SCHEMA = make_meta({'TF': str, 'target': str, 'importance': float, 'count' : float})
 
@@ -19,7 +23,8 @@ def perform_fdr(
         early_stop_window_length,
         seed,
         verbose,
-        num_permutations
+        num_permutations,
+        output_dir
 ):
     # Extract TF name and non-TF name lists from expression matrix object.
     expression_matrix, gene_names, tf_names = _prepare_input(expression_data, None, tf_names)
@@ -33,16 +38,20 @@ def perform_fdr(
         are_tfs_clustered = True
 
     # No clustering necessary, just create 'dummy' clustering with singleton clusters.
+    tf_representatives = []
+    non_tf_representatives = []
     if cluster_representative_mode == 'all_genes':
-        tf_to_clust = {tf : id for id, tf in enumerate(tf_names)}
-        non_tf_to_clust = {non_tf : id for id, non_tf in enumerate(non_tf_names)}
-        all_gene_clustering = merge_gene_clusterings(tf_to_clust, non_tf_to_clust)
+        all_gene_clustering=None
         tf_representatives = tf_names
         non_tf_representatives = non_tf_names
         are_tfs_clustered = False
     else: # Cluster genes based on Wasserstein distance.
         # Compute full distance matrix between all pairs of input genes.
         dist_matrix_all = compute_wasserstein_distance_matrix(expression_data, num_threads=-1)
+
+        if not output_dir is None:
+            dist_matrix_all.to_csv(os.path.join(output_dir, 'distance_matrix.csv'))
+
         # Separate TF and non-TF distances and cluster both types individually.
         tf_bool = [True if gene in tf_names else False for gene in dist_matrix_all.columns]
         non_tf_bool = [False if gene in tf_names else True for gene in dist_matrix_all.columns]
@@ -52,12 +61,23 @@ def perform_fdr(
         non_tf_to_clust = cluster_genes_to_dict(dist_mat_non_tfs, num_clusters=num_non_tf_clusters)
         tf_to_clust = cluster_genes_to_dict(dist_mat_tfs, num_clusters=num_tf_clusters)
         all_gene_clustering = merge_gene_clusterings(tf_to_clust, non_tf_to_clust)
+
+        if not output_dir is None:
+            with open(os.path.join(output_dir, 'gene_clustering.pkl'), 'wb') as f:
+                pickle.dump(all_gene_clustering, f)
+
         if cluster_representative_mode == 'medoid':
             tf_representatives = compute_medoids(tf_to_clust, dist_matrix_all)
             non_tf_representatives = compute_medoids(non_tf_to_clust, dist_matrix_all)
         else: # cluster_representative_mode='random'
             tf_representatives = tf_names
             non_tf_representatives = non_tf_names
+
+    if not output_dir is None and cluster_representative_mode=='medoid':
+        with open(os.path.join(output_dir, 'tf_medoids.pkl'), 'wb') as f:
+            pickle.dump(tf_representatives, f)
+        with open(os.path.join(output_dir, 'non_tf_medoids.pkl'), 'wb') as f:
+            pickle.dump(non_tf_representatives, f)
 
     return diy_fdr(expression_data=expression_data,
                    regressor_type='GBM',
@@ -73,6 +93,7 @@ def perform_fdr(
                    seed=seed,
                    verbose=verbose,
                    n_permutations=num_permutations,
+                   output_dir=output_dir
                    )
 
 
@@ -90,6 +111,7 @@ def diy_fdr(expression_data,
             seed=None,
             verbose=False,
             n_permutations=1000,
+            output_dir=None
             ):
     """
     :param are_tfs_clustered: True if TFs have also been clustered for FDR control.
@@ -135,8 +157,6 @@ def diy_fdr(expression_data,
             raise ValueError(f'Input GRN is None, but needs to be passed in FDR mode.')
         if tf_representatives is None or non_tf_representatives is None:
             raise ValueError(f'TF or non-TF representatives are None, but need to passed in FDR mode.')
-        if not are_tfs_clustered is None and gene_to_cluster is None:
-            raise ValueError('Are_TFs_clustered information is not given, but clustered FDR mode is chosen.')
         if gene_to_cluster is None:
             if verbose:
                 print("Genes have not been clustered, running full FDR mode.")
@@ -153,7 +173,8 @@ def diy_fdr(expression_data,
                                  client=client,
                                  early_stop_window_length=early_stop_window_length,
                                  seed=seed,
-                                 n_permutations=n_permutations)
+                                 n_permutations=n_permutations,
+                                 output_dir=output_dir)
 
         if verbose:
             print('{} partitions'.format(graph.npartitions))
@@ -184,6 +205,7 @@ def create_graph_fdr(expression_matrix: np.ndarray,
                      repartition_multiplier=1,
                      seed=DEMON_SEED,
                      n_permutations=1000,
+                     output_dir=None
                      ):
     """
     Main API function for FDR control. Create a Dask computation graph.
@@ -329,6 +351,9 @@ def create_graph_fdr(expression_matrix: np.ndarray,
                 seed,
             )
 
+            if not output_dir is None:
+                compute(save_df(delayed_link_df, os.path.join(output_dir, f'target_{target_gene_name}.feather')))
+
             if delayed_link_df is not None:
                 delayed_link_dfs.append(delayed_link_df)
 
@@ -369,6 +394,9 @@ def create_graph_fdr(expression_matrix: np.ndarray,
                 early_stop_window_length,
                 seed,
             )
+
+            if not output_dir is None:
+                compute(save_df(delayed_link_df, os.path.join(output_dir, f'cluster_{cluster_id}.feather')))
 
             if delayed_link_dfs is not None:
                 delayed_link_dfs.append(delayed_link_df)
@@ -543,3 +571,7 @@ def count_computation_sampled_representative(
     )
 
     return partial_input_grn_fdr_df
+
+@delayed
+def save_df(df, filename):
+    df.to_feather(filename)

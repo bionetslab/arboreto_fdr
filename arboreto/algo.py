@@ -6,6 +6,7 @@ import pandas as pd
 from distributed import Client, LocalCluster
 from arboreto.core import create_graph, SGBM_KWARGS, RF_KWARGS, EARLY_STOP_WINDOW_LENGTH
 from arboreto.fdr import perform_fdr
+import os
 
 def grnboost2_fdr(
         expression_data : pd.DataFrame,
@@ -18,7 +19,8 @@ def grnboost2_fdr(
         early_stop_window_length=EARLY_STOP_WINDOW_LENGTH,
         seed=None,
         verbose=False,
-        num_permutations=1000
+        num_permutations=1000,
+        output_dir=None
 ):
     if cluster_representative_mode not in {'medoid', 'random', 'all_genes'}:
         raise ValueError('cluster_representative_mode must be one of "medoid", "random", "all_genes"')
@@ -28,6 +30,11 @@ def grnboost2_fdr(
 
     if verbose and num_tf_clusters == -1:
         print("running FDR without TF clustering")
+
+    if output_dir is not None:
+        if not os.path.exists(output_dir):
+            print('output directory does not exist, creating!')
+            os.makedirs(output_dir, exist_ok=True)
 
     # If input GRN has not been given, run one GRNBoost inference call upfront and transform into necessary
     # dictionary-based format.
@@ -52,7 +59,8 @@ def grnboost2_fdr(
         early_stop_window_length,
         seed,
         verbose,
-        num_permutations
+        num_permutations,
+        output_dir
     )
 
 
