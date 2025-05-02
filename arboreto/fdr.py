@@ -318,6 +318,7 @@ def create_graph_fdr(expression_matrix: np.ndarray,
                 regressor_type,
                 regressor_kwargs,
                 future_tf_matrix,
+                are_tfs_clustered,
                 future_tf_matrix_gene_names,
                 target_gene_name,
                 target_gene_expression,
@@ -387,6 +388,7 @@ def count_computation_medoid_representative(
         regressor_type,
         regressor_kwargs,
         tf_matrix,
+        are_tfs_clustered,
         tf_matrix_gene_names: list[str],
         target_gene_name: str,
         target_gene_expression: np.ndarray,
@@ -397,7 +399,10 @@ def count_computation_medoid_representative(
         seed=DEMON_SEED,
 ):
     # Remove target from TF-list and TF-expression matrix if target itself is a TF
-    (clean_tf_matrix, clean_tf_matrix_gene_names) = clean(tf_matrix, tf_matrix_gene_names, target_gene_name)
+    if not are_tfs_clustered:
+        (clean_tf_matrix, clean_tf_matrix_gene_names) = clean(tf_matrix, tf_matrix_gene_names, target_gene_name)
+    else:
+        clean_tf_matrix, clean_tf_matrix_gene_names = tf_matrix, tf_matrix_gene_names
 
     # Special case in which only a single TF is passed and the target gene
     # here is the same as the TF (clean_tf_matrix is empty after cleaning):
@@ -466,6 +471,7 @@ def count_computation_sampled_representative(
         seed=DEMON_SEED,
 
 ):
+    are_tfs_clustered = (not cluster_to_tfs is None)
     # Initialize counts on input GRN edges.
     for _, val in partial_input_grn.items():
         val.update({'count': 0.0})
@@ -478,8 +484,10 @@ def count_computation_sampled_representative(
         target_expression = target_gene_expressions[:, target_gene_index]
 
         # Remove target from TF-list and TF-expression matrix if target itself is a TF
-        # TODO: in case of target being TF, always leave TF in TF matrix
-        (clean_tf_matrix, clean_tf_matrix_gene_names) = clean(tf_matrix, tf_matrix_gene_names, target_gene_name)
+        if not are_tfs_clustered:
+            (clean_tf_matrix, clean_tf_matrix_gene_names) = clean(tf_matrix, tf_matrix_gene_names, target_gene_name)
+        else:
+            clean_tf_matrix, clean_tf_matrix_gene_names = tf_matrix, tf_matrix_gene_names
 
         # Sample one TF per TF-cluster and subset TF expression matrix in case of TFs having been clustered.
         if not cluster_to_tfs is None:
