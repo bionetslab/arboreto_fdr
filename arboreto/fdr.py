@@ -1,5 +1,7 @@
 from html.parser import piclose
 
+from bokeh.io import output_notebook
+
 from arboreto.core import EARLY_STOP_WINDOW_LENGTH, SGBM_KWARGS, DEMON_SEED, to_tf_matrix, target_gene_indices, clean, fit_model, to_links_df
 from arboreto.fdr_utils import compute_wasserstein_distance_matrix, cluster_genes_to_dict, merge_gene_clusterings, compute_medoids, partition_input_grn, invert_tf_to_cluster_dict, count_helper, subset_tf_matrix, _prepare_client, _prepare_input
 import numpy as np
@@ -349,10 +351,8 @@ def create_graph_fdr(expression_matrix: np.ndarray,
                 n_permutations,
                 early_stop_window_length,
                 seed,
+                output_dir
             )
-
-            if not output_dir is None:
-                compute(save_df(delayed_link_df, os.path.join(output_dir, f'target_{target_gene_name}.feather')))
 
             if delayed_link_df is not None:
                 delayed_link_dfs.append(delayed_link_df)
@@ -380,6 +380,7 @@ def create_graph_fdr(expression_matrix: np.ndarray,
                 future_cluster_to_tfs = None
 
             delayed_link_df = delayed(count_computation_sampled_representative, pure=True)(
+                cluster_id,
                 regressor_type,
                 regressor_kwargs,
                 future_tf_matrix,
@@ -393,10 +394,9 @@ def create_graph_fdr(expression_matrix: np.ndarray,
                 n_permutations,
                 early_stop_window_length,
                 seed,
+                output_dir,
             )
 
-            if not output_dir is None:
-                compute(save_df(delayed_link_df, os.path.join(output_dir, f'cluster_{cluster_id}.feather')))
 
             if delayed_link_dfs is not None:
                 delayed_link_dfs.append(delayed_link_df)
@@ -425,6 +425,7 @@ def count_computation_medoid_representative(
         n_permutations: int,
         early_stop_window_length=EARLY_STOP_WINDOW_LENGTH,
         seed=DEMON_SEED,
+        output_dir=None
 ):
     # Remove target from TF-list and TF-expression matrix if target itself is a TF
     if not are_tfs_clustered:
@@ -480,10 +481,14 @@ def count_computation_medoid_representative(
         columns=['TF', 'target', 'importance', 'count']
     )
 
+    if not output_dir is None:
+        partial_input_grn_fdr_df.to_feather(os.path.join(output_dir, f'target_{target_gene_name}.feather'))
+
     return partial_input_grn_fdr_df
 
 
 def count_computation_sampled_representative(
+        cluster_id,
         regressor_type,
         regressor_kwargs,
         tf_matrix,
@@ -497,6 +502,7 @@ def count_computation_sampled_representative(
         n_permutations : int,
         early_stop_window_length=EARLY_STOP_WINDOW_LENGTH,
         seed=DEMON_SEED,
+        output_dir=None
 
 ):
     are_tfs_clustered = (not cluster_to_tfs is None)
@@ -569,6 +575,9 @@ def count_computation_sampled_representative(
         [(TF, target, v['importance'], v['count']) for (TF, target), v in partial_input_grn.items()],
         columns=['TF', 'target', 'importance', 'count']
     )
+
+    if not output_dir is None:
+        partial_input_grn_fdr_df.to_feather(os.path.join(output_dir, f'cluster_{cluster_id}.feather'))
 
     return partial_input_grn_fdr_df
 
