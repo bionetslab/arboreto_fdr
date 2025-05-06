@@ -1,4 +1,5 @@
 
+import copy
 from arboreto.core import EARLY_STOP_WINDOW_LENGTH, SGBM_KWARGS, DEMON_SEED, to_tf_matrix, target_gene_indices, clean, fit_model, to_links_df
 from arboreto.fdr_utils import compute_wasserstein_distance_matrix, cluster_genes_to_dict, merge_gene_clusterings, compute_medoids, partition_input_grn, invert_tf_to_cluster_dict, count_helper, subset_tf_matrix, _prepare_client, _prepare_input
 import numpy as np
@@ -424,6 +425,9 @@ def count_computation_medoid_representative(
         seed=DEMON_SEED,
         output_dir=None
 ):
+
+    partial_input_grn = copy.deepcopy(partial_input_grn)
+
     # Remove target from TF-list and TF-expression matrix if target itself is a TF
     if not are_tfs_clustered:
         (clean_tf_matrix, clean_tf_matrix_gene_names) = clean(tf_matrix, tf_matrix_gene_names, target_gene_name)
@@ -502,6 +506,9 @@ def count_computation_sampled_representative(
         output_dir=None
 
 ):
+
+    partial_input_grn = copy.deepcopy(partial_input_grn)
+
     are_tfs_clustered = (not cluster_to_tfs is None)
     # Initialize counts on input GRN edges.
     for _, val in partial_input_grn.items():
