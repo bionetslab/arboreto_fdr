@@ -1,6 +1,7 @@
 from html.parser import piclose
 
 from bokeh.io import output_notebook
+from distributed.utils_test import cluster
 
 from arboreto.core import EARLY_STOP_WINDOW_LENGTH, SGBM_KWARGS, DEMON_SEED, to_tf_matrix, target_gene_indices, clean, fit_model, to_links_df
 from arboreto.fdr_utils import compute_wasserstein_distance_matrix, cluster_genes_to_dict, merge_gene_clusterings, compute_medoids, partition_input_grn, invert_tf_to_cluster_dict, count_helper, subset_tf_matrix, _prepare_client, _prepare_input
@@ -163,6 +164,14 @@ def diy_fdr(expression_data,
             if verbose:
                 print("Genes have not been clustered, running full FDR mode.")
 
+        # Compute per-target importance sums for scaling in case TFs have been clustered.
+        per_target_importance_sums = dict()
+        if are_tfs_clustered:
+            for (_, target), import_dict in input_grn.items():
+                if not target in per_target_importance_sums:
+                    per_target_importance_sums[target] = 0.0
+                per_target_importance_sums[target] += import_dict['importance']
+
         graph = create_graph_fdr(expression_matrix,
                                  gene_names=gene_names,
                                  are_tfs_clustered=are_tfs_clustered,
@@ -170,6 +179,7 @@ def diy_fdr(expression_data,
                                  non_tf_representatives=non_tf_representatives,
                                  gene_to_cluster=gene_to_cluster,
                                  input_grn=input_grn,
+                                 per_target_importance_sums=per_target_importance_sums,
                                  regressor_type=regressor_type,
                                  regressor_kwargs=regressor_kwargs,
                                  client=client,
@@ -200,6 +210,7 @@ def create_graph_fdr(expression_matrix: np.ndarray,
                      non_tf_representatives: list[str],
                      gene_to_cluster: dict[str, int],
                      input_grn: dict,
+                     per_target_importance_sums: dict,
                      regressor_type,
                      regressor_kwargs,
                      client,
@@ -327,6 +338,15 @@ def create_graph_fdr(expression_matrix: np.ndarray,
     # future_gene_to_cluster = client.scatter(gene_to_cluster, broadcast=True) --> gives dict key error...
     [future_gene_to_cluster] = client.scatter([gene_to_cluster], broadcast=True)
 
+    # If TFs have been clustered in 'random' mode, then per permutation, one TF per cluster needs to be
+    # drawn. Precompute the necessary cluster-TF relationships here such that keys are cluster IDs
+    # and values are list of TFs.
+    if are_tfs_clustered:
+        cluster_to_tfs = invert_tf_to_cluster_dict(tf_representatives, gene_to_cluster)
+        [future_cluster_to_tfs] = client.scatter([cluster_to_tfs], broadcast=True)
+    else:
+        future_cluster_to_tfs = None
+
     delayed_link_dfs = []  # collection of delayed link DataFrames
 
     # Use pre-computed medoid representatives for TFs and/or non-TFs.
@@ -347,7 +367,9 @@ def create_graph_fdr(expression_matrix: np.ndarray,
                 target_gene_name,
                 target_gene_expression,
                 target_subset_grn,
+                per_target_importance_sums,
                 future_gene_to_cluster,
+                future_cluster_to_tfs,
                 n_permutations,
                 early_stop_window_length,
                 seed,
@@ -370,15 +392,6 @@ def create_graph_fdr(expression_matrix: np.ndarray,
             # Dask does not allow iterating over delayed dictionary, so no delayed() at this point.
             target_subset_grn = grn_subsets_per_target[cluster_id]
 
-            # If TFs have been clustered in 'random' mode, then per permutation, one TF per cluster needs to be
-            # drawn. Precompute the necessary cluster-TF relationships here such that keys are cluster IDs
-            # and values are list of TFs.
-            if are_tfs_clustered:
-                cluster_to_tfs = invert_tf_to_cluster_dict(tf_representatives, gene_to_cluster)
-                [future_cluster_to_tfs] = client.scatter([cluster_to_tfs], broadcast=True)
-            else:
-                future_cluster_to_tfs = None
-
             delayed_link_df = delayed(count_computation_sampled_representative, pure=True)(
                 cluster_id,
                 regressor_type,
@@ -391,6 +404,7 @@ def create_graph_fdr(expression_matrix: np.ndarray,
                 cluster_expression,
                 target_subset_grn,
                 gene_to_cluster,
+                per_target_importance_sums,
                 n_permutations,
                 early_stop_window_length,
                 seed,
@@ -421,7 +435,9 @@ def count_computation_medoid_representative(
         target_gene_name: str,
         target_gene_expression: np.ndarray,
         partial_input_grn: dict,  # {(TF, target): {'importance': float}}
+        per_target_importance_sums,
         gene_to_clust: dict[str, int],
+        cluster_to_tf : dict,
         n_permutations: int,
         early_stop_window_length=EARLY_STOP_WINDOW_LENGTH,
         seed=DEMON_SEED,
@@ -472,6 +488,14 @@ def count_computation_medoid_representative(
             target_gene_name
         )
 
+        if are_tfs_clustered:
+            shuffled_target_sum = 0.0
+            for tf, _, importance in zip(shuffled_grn_df['TF'], shuffled_grn_df['target'], shuffled_grn_df['importance']):
+                tf_cluster_size = len(cluster_to_tf[gene_to_clust[tf]])
+                shuffled_target_sum += importance * tf_cluster_size
+            scaling_factor = per_target_importance_sums[target_gene_name] / shuffled_target_sum
+            shuffled_grn_df['importance'] = shuffled_grn_df['importance'] * scaling_factor
+
         # Update the count values of the partial input GRN
         count_helper(shuffled_grn_df, partial_input_grn, gene_to_clust)
 
@@ -499,6 +523,7 @@ def count_computation_sampled_representative(
         target_gene_expressions,
         partial_input_grn: dict,
         gene_to_cluster: dict[str, int],
+        per_target_importance_sums : dict,
         n_permutations : int,
         early_stop_window_length=EARLY_STOP_WINDOW_LENGTH,
         seed=DEMON_SEED,
@@ -566,6 +591,14 @@ def count_computation_sampled_representative(
             clean_tf_matrix_gene_names,
             target_gene_name
         )
+
+        if are_tfs_clustered:
+            shuffled_target_sum = 0.0
+            for tf, _, importance in zip(shuffled_grn_df['TF'], shuffled_grn_df['target'], shuffled_grn_df['importance']):
+                tf_cluster_size = len(cluster_to_tfs[gene_to_cluster[tf]])
+                shuffled_target_sum += importance * tf_cluster_size
+            scaling_factor = per_target_importance_sums[target_gene_name] / shuffled_target_sum
+            shuffled_grn_df['importance'] = shuffled_grn_df['importance'] * scaling_factor
 
         # Update the count values of the partial input GRN.
         count_helper(shuffled_grn_df, partial_input_grn, gene_to_cluster)
