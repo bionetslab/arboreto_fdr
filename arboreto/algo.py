@@ -39,22 +39,38 @@ def grnboost2_fdr(
     # If input GRN has not been given, run one GRNBoost inference call upfront and transform into necessary
     # dictionary-based format.
     if input_grn is None:
-        input_grn_df = grnboost2(
+        input_grn = grnboost2(
             expression_data=expression_data,
             tf_names=tf_names,
             client_or_address=client_or_address
         )
-        input_grn = dict()
-        for tf, target, importance in zip(input_grn_df['TF'], input_grn_df['target'], input_grn_df['importance']):
-            input_grn[(tf, target)] = {'importance': importance}
+
+    # Align the input GRN and expression data w.r.t. the genes
+    genes_input_grn = set(input_grn['TF']).union(set(input_grn['target']))
+    genes_expression_data = set(expression_data.columns)
+
+    genes_intersection = list(genes_input_grn.intersection(genes_expression_data))
+
+    expression_data_aligned = expression_data[genes_intersection]
+
+    keep_bool = input_grn['TF'].isin(genes_intersection) * input_grn['target'].isin(genes_intersection)
+    input_grn_aligned = input_grn[keep_bool]
+
+    # Extract the TFs from the input GRN
+    tf_names_input_grn = list(set(input_grn_aligned['TF']))
+
+    # Transform input GRN into dict format
+    input_grn_dict = dict()
+    for tf, target, importance in zip(input_grn_aligned['TF'], input_grn_aligned['target'], input_grn_aligned['importance']):
+        input_grn_dict[(tf, target)] = {'importance': importance}
 
     return perform_fdr(
-        expression_data,
-        input_grn,
+        expression_data_aligned,
+        input_grn_dict,
         num_non_tf_clusters,
         num_tf_clusters,
         cluster_representative_mode,
-        tf_names,
+        tf_names_input_grn,
         client_or_address,
         early_stop_window_length,
         seed,
