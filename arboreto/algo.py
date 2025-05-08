@@ -10,11 +10,11 @@ import os
 
 def grnboost2_fdr(
         expression_data : pd.DataFrame,
-        tf_names : list[str],
-        num_non_tf_clusters : int,
         cluster_representative_mode : str,
+        num_non_tf_clusters : int = -1,
         num_tf_clusters : int = -1,
         input_grn : dict = None,
+        tf_names : list[str] = None,
         client_or_address='local',
         early_stop_window_length=EARLY_STOP_WINDOW_LENGTH,
         seed=None,
@@ -25,11 +25,15 @@ def grnboost2_fdr(
     if cluster_representative_mode not in {'medoid', 'random', 'all_genes'}:
         raise ValueError('cluster_representative_mode must be one of "medoid", "random", "all_genes"')
 
-    if num_non_tf_clusters < 1:
-        raise ValueError('Number of TF and non-TF clusters needs to be at least 1.')
+    if num_non_tf_clusters==-1 and num_tf_clusters==-1 and not cluster_representative_mode == "all_genes":
+        print("No cluster numbers given, running full FDR mode...")
+        cluster_representative_mode="all_genes"
 
     if verbose and num_tf_clusters == -1:
         print("running FDR without TF clustering")
+
+    if verbose and num_non_tf_clusters == -1:
+        print("running FDR without non-TF clustering")
 
     if output_dir is not None:
         if not os.path.exists(output_dir):

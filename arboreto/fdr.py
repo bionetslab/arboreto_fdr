@@ -37,6 +37,10 @@ def perform_fdr(
     else:
         are_tfs_clustered = True
 
+    # Check if non-TF clustering is desired.
+    if num_non_tf_clusters == -1:
+        num_non_tf_clusters = len(non_tf_names)
+
     # No clustering necessary, just create 'dummy' clustering with singleton clusters.
     tf_representatives = []
     non_tf_representatives = []
