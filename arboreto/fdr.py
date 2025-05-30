@@ -1,5 +1,8 @@
 
 import copy
+
+from bokeh.layouts import column
+
 from arboreto.core import EARLY_STOP_WINDOW_LENGTH, SGBM_KWARGS, DEMON_SEED, to_tf_matrix, target_gene_indices, clean, fit_model, to_links_df
 from arboreto.fdr_utils import compute_wasserstein_distance_matrix, cluster_genes_to_dict, merge_gene_clusterings, compute_medoids, partition_input_grn, invert_tf_to_cluster_dict, count_helper, subset_tf_matrix, _prepare_client, _prepare_input
 import numpy as np
@@ -83,7 +86,8 @@ def perform_fdr(
         with open(os.path.join(output_dir, 'non_tf_medoids.pkl'), 'wb') as f:
             pickle.dump(non_tf_representatives, f)
 
-    return diy_fdr(expression_data=expression_data,
+    fdr_controlled_df = diy_fdr(
+                   expression_data=expression_data,
                    regressor_type='GBM',
                    regressor_kwargs=SGBM_KWARGS,
                    gene_names=gene_names,
@@ -99,6 +103,10 @@ def perform_fdr(
                    n_permutations=num_permutations,
                    output_dir=output_dir
                    )
+    # Transform counts into P-values and remove count column.
+    fdr_controlled_df['pvalue'] = (fdr_controlled_df['count']+1)/(num_permutations+1)
+    fdr_controlled_df.drop(columns=['count'], inplace=True)
+    return fdr_controlled_df
 
 
 def diy_fdr(expression_data,
