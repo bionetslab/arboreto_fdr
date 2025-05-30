@@ -471,9 +471,10 @@ def count_computation_medoid_representative(
         val.update({'count': 0.0})
 
     # Iterate for num permutations
-    for _ in range(n_permutations):
+    for i in range(n_permutations):
 
         # Shuffle target gene expression vector
+        np.random.seed(i)
         permuted_target_gene_expression = np.random.permutation(target_gene_expression)
 
         # Train the random forest regressor
@@ -581,6 +582,7 @@ def count_computation_sampled_representative(
             raise ValueError("Cleaned TF matrix is empty, skipping inference of target {}.".format(target_gene_name))
 
         # Shuffle target gene expression vector
+        np.random.seed(perm)
         permuted_target_gene_expression = np.random.permutation(target_expression)
 
         # Train the random forest regressor.
