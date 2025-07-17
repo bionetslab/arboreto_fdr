@@ -1,10 +1,7 @@
 
 import copy
-
-from bokeh.layouts import column
-
 from arboreto.core import EARLY_STOP_WINDOW_LENGTH, SGBM_KWARGS, DEMON_SEED, to_tf_matrix, target_gene_indices, clean, fit_model, to_links_df
-from arboreto.fdr_utils import compute_wasserstein_distance_matrix, cluster_genes_to_dict, merge_gene_clusterings, compute_medoids, partition_input_grn, invert_tf_to_cluster_dict, count_helper, subset_tf_matrix, _prepare_client, _prepare_input
+from arboreto.fdr_utils import compute_correlation_distance_matrix, compute_wasserstein_distance_matrix, cluster_genes_to_dict, merge_gene_clusterings, compute_medoids, partition_input_grn, invert_tf_to_cluster_dict, count_helper, subset_tf_matrix, _prepare_client, _prepare_input
 import numpy as np
 import pandas as pd
 from dask import delayed, compute
@@ -21,7 +18,10 @@ def perform_fdr(
         num_non_tf_clusters : int,
         num_tf_clusters : int,
         cluster_representative_mode : str,
+        target_cluster_mode : str,
+        tf_cluster_mode : str,
         tf_names,
+        target_subset,
         client_or_address,
         early_stop_window_length,
         seed,
@@ -46,55 +46,70 @@ def perform_fdr(
 
     # No clustering necessary, just create 'dummy' clustering with singleton clusters.
     tf_representatives = []
-    non_tf_representatives = []
+    target_representatives = []
+    tf_to_clust = None
+    target_to_clust = None
     if cluster_representative_mode == 'all_genes':
-        all_gene_clustering=None
         tf_representatives = tf_names
-        non_tf_representatives = non_tf_names
+        target_representatives = gene_names
         are_tfs_clustered = False
-    else: # Cluster genes based on Wasserstein distance.
-        # Compute full distance matrix between all pairs of input genes.
-        dist_matrix_all = compute_wasserstein_distance_matrix(expression_data, num_threads=-1)
+    else:
+        # In case of Wasserstein clustering on targets, compute whole distance matrix on all targets.
+        if target_cluster_mode == 'wasserstein':
+            dist_matrix_all = compute_wasserstein_distance_matrix(expression_data, num_threads=-1)
+
+        if tf_cluster_mode == 'correlation':
+            tf_bool = [True if gene in tf_names else False for gene in expression_data.columns]
+            exp_matrix_tfs = expression_data.loc[:, tf_bool]
+            corr_distances_tfs = compute_correlation_distance_matrix(exp_matrix_tfs)
+
+        # Cluster targets and TFs separately given respective mode.
+        if target_cluster_mode == 'kmeans':
+            target_to_clust, target_medoids = cluster_genes_to_dict(expression_data, num_clusters=num_non_tf_clusters,
+                                                                    mode='kmeans')
+        elif target_cluster_mode == 'wasserstein':
+            target_to_clust, target_medoids = cluster_genes_to_dict(dist_matrix_all, num_clusters=num_non_tf_clusters,
+                                                                    mode='distance')
+        else:
+            print(f'Unknown target cluster mode: {target_cluster_mode}')
+
+        if tf_cluster_mode == 'correlation':
+            tf_to_clust, tf_medoids = cluster_genes_to_dict(corr_distances_tfs, num_clusters=num_tf_clusters, mode='distance')
+        elif tf_cluster_mode == 'kmeans':
+            tf_to_clust, tf_medoids = cluster_genes_to_dict(exp_matrix_tfs, num_clusters=num_tf_clusters,
+                                                            mode='distance')
+        else:
+            print(f'Unknown TF cluster mode: {tf_cluster_mode}')
 
         if not output_dir is None:
-            dist_matrix_all.to_csv(os.path.join(output_dir, 'distance_matrix.csv'))
-
-        # Separate TF and non-TF distances and cluster both types individually.
-        tf_bool = [True if gene in tf_names else False for gene in dist_matrix_all.columns]
-        non_tf_bool = [False if gene in tf_names else True for gene in dist_matrix_all.columns]
-        dist_mat_non_tfs = dist_matrix_all.loc[non_tf_bool, non_tf_bool]
-        dist_mat_tfs = dist_matrix_all.loc[tf_bool, tf_bool]
-
-        non_tf_to_clust = cluster_genes_to_dict(dist_mat_non_tfs, num_clusters=num_non_tf_clusters)
-        tf_to_clust = cluster_genes_to_dict(dist_mat_tfs, num_clusters=num_tf_clusters)
-        all_gene_clustering = merge_gene_clusterings(tf_to_clust, non_tf_to_clust)
-
-        if not output_dir is None:
-            with open(os.path.join(output_dir, 'gene_clustering.pkl'), 'wb') as f:
-                pickle.dump(all_gene_clustering, f)
+            with open(os.path.join(output_dir, 'tf_clustering.pkl'), 'wb') as f:
+                pickle.dump(tf_to_clust, f)
+            with open(os.path.join(output_dir, 'all_genes_clustering.pkl'), 'wb') as f:
+                pickle.dump(target_to_clust, f)
 
         if cluster_representative_mode == 'medoid':
-            tf_representatives = compute_medoids(tf_to_clust, dist_matrix_all)
-            non_tf_representatives = compute_medoids(non_tf_to_clust, dist_matrix_all)
-        else: # cluster_representative_mode='random'
+            tf_representatives = tf_medoids
+            target_representatives = target_medoids
+        else: # In random mode, representatives are drawn from whole set of possible TFs and targets.
             tf_representatives = tf_names
-            non_tf_representatives = non_tf_names
+            target_representatives = gene_names
 
     if not output_dir is None and cluster_representative_mode=='medoid':
         with open(os.path.join(output_dir, 'tf_medoids.pkl'), 'wb') as f:
             pickle.dump(tf_representatives, f)
-        with open(os.path.join(output_dir, 'non_tf_medoids.pkl'), 'wb') as f:
-            pickle.dump(non_tf_representatives, f)
+        with open(os.path.join(output_dir, 'target_medoids.pkl'), 'wb') as f:
+            pickle.dump(target_representatives, f)
 
-    fdr_controlled_df = diy_fdr(
-                   expression_data=expression_data,
+    fdr_controlled_df = diy_fdr(expression_data=expression_data,
                    regressor_type='GBM',
                    regressor_kwargs=SGBM_KWARGS,
                    gene_names=gene_names,
                    are_tfs_clustered=are_tfs_clustered,
                    tf_representatives=tf_representatives,
-                   non_tf_representatives=non_tf_representatives,
-                   gene_to_cluster=all_gene_clustering,
+                   target_representatives=target_representatives,
+                   target_subset=target_subset,
+                   tf_to_cluster=tf_to_clust,
+                   target_to_cluster=target_to_clust,
                    input_grn=input_grn,
                    client_or_address=client_or_address,
                    early_stop_window_length=early_stop_window_length,
@@ -109,13 +124,16 @@ def perform_fdr(
     return fdr_controlled_df
 
 
+
 def diy_fdr(expression_data,
             regressor_type,
             regressor_kwargs,
             are_tfs_clustered,
             tf_representatives,
-            non_tf_representatives,
-            gene_to_cluster,
+            target_representatives,
+            target_subset,
+            tf_to_cluster,
+            target_to_cluster,
             input_grn,
             gene_names=None,
             client_or_address='local',
@@ -167,9 +185,9 @@ def diy_fdr(expression_data,
 
         if input_grn is None:
             raise ValueError(f'Input GRN is None, but needs to be passed in FDR mode.')
-        if tf_representatives is None or non_tf_representatives is None:
+        if tf_representatives is None or target_representatives is None:
             raise ValueError(f'TF or non-TF representatives are None, but need to passed in FDR mode.')
-        if gene_to_cluster is None:
+        if tf_to_cluster is None and target_to_cluster is None:
             if verbose:
                 print("Genes have not been clustered, running full FDR mode.")
 
@@ -185,8 +203,10 @@ def diy_fdr(expression_data,
                                  gene_names=gene_names,
                                  are_tfs_clustered=are_tfs_clustered,
                                  tf_representatives=tf_representatives,
-                                 non_tf_representatives=non_tf_representatives,
-                                 gene_to_cluster=gene_to_cluster,
+                                 target_representatives=target_representatives,
+                                 target_subset=target_subset,
+                                 tf_to_cluster=tf_to_cluster,
+                                 target_to_cluster=target_to_cluster,
                                  input_grn=input_grn,
                                  per_target_importance_sums=per_target_importance_sums,
                                  regressor_type=regressor_type,
@@ -216,8 +236,10 @@ def create_graph_fdr(expression_matrix: np.ndarray,
                      gene_names: list[str],
                      are_tfs_clustered,
                      tf_representatives: list[str],
-                     non_tf_representatives: list[str],
-                     gene_to_cluster: dict[str, int],
+                     target_representatives: list[str],
+                     target_subset : list[str],
+                     tf_to_cluster: dict[str, int],
+                     target_to_cluster: dict[str, int],
                      input_grn: dict,
                      per_target_importance_sums: dict,
                      regressor_type,
@@ -315,21 +337,27 @@ def create_graph_fdr(expression_matrix: np.ndarray,
     assert client, "Client not given, but is required in create_graph_fdr!"
     # Extract FDR mode information from TF and non-TF representative lists.
     fdr_mode = None
-    if len(tf_representatives) + len(non_tf_representatives) == len(gene_names) and not gene_to_cluster is None:
+    if (not tf_to_cluster is None and
+            not target_to_cluster is None and
+            len(tf_representatives) == len(tf_to_cluster.keys()) and
+            len(target_representatives) == len(gene_names)
+    ):
         fdr_mode = 'random'
-    elif not gene_to_cluster is None:
+    elif not tf_to_cluster is None and not target_to_cluster is None:
         fdr_mode = 'medoid'
     else:  # Full FDR mode coincides with medoid mode, with all genes assigned to dummy singleton clusters.
         fdr_mode = 'medoid'
         print("Running full FDR mode...")
-        gene_to_cluster = {gene: cluster_id for cluster_id, gene in
-                           enumerate(tf_representatives + non_tf_representatives)}
+        tf_to_cluster = {gene: cluster_id for cluster_id, gene in
+                           enumerate(tf_representatives)}
+        target_to_cluster = {gene: cluster_id for cluster_id, gene in
+                           enumerate(target_representatives)}
 
     # Check if gene_to_cluster is complete, i.e. if for every gene in expression matrix, a corresponding cluster has
     # been precomputed.
-    all_genes = {gene for gene, _ in gene_to_cluster.items()}
-    assert expression_matrix.shape[1] == len(all_genes), "Size of expression matrix does not match gene names."
-    assert len(gene_names) == len(all_genes), "Number of clustered genes and genes in expression matrix do not match."
+    all_target_genes = {gene for gene, _ in target_to_cluster.items()}
+    assert expression_matrix.shape[1] == len(all_target_genes), "Size of expression matrix does not match gene names."
+    assert len(gene_names) == len(all_target_genes), "Number of clustered genes and genes in expression matrix do not match."
 
     # Subset expression matrix to TF representatives ('medoid' mode). Leave as is, if TFs have not been clustered or
     # FDR mode is 'random'.
@@ -337,21 +365,22 @@ def create_graph_fdr(expression_matrix: np.ndarray,
 
     # Partition input GRN into dict storing target-cluster IDs as keys and edge dicts (as in input GRN) as values.
     # Second data structure stores target genes per cluster.
-    grn_subsets_per_target, genes_per_target_cluster = partition_input_grn(input_grn, gene_to_cluster)
+    grn_subsets_per_target, genes_per_target_cluster = partition_input_grn(input_grn, target_to_cluster)
 
     future_tf_matrix = client.scatter(tf_matrix, broadcast=True)
     # [1] wrap in a list of 1 -> unsure why but Matt. Rocklin does this often...
     [future_tf_matrix_gene_names] = client.scatter([tf_matrix_gene_names], broadcast=True)
 
-    # Broadcast gene-to-cluster dictionary among all workers.
+    # Broadcast gene-to-cluster dictionaries among all workers.
     # future_gene_to_cluster = client.scatter(gene_to_cluster, broadcast=True) --> gives dict key error...
-    [future_gene_to_cluster] = client.scatter([gene_to_cluster], broadcast=True)
+    [future_tf_to_cluster] = client.scatter([tf_to_cluster], broadcast=True)
+    [future_target_to_cluster] = client.scatter([target_to_cluster], broadcast=True)
 
     # If TFs have been clustered in 'random' mode, then per permutation, one TF per cluster needs to be
     # drawn. Precompute the necessary cluster-TF relationships here such that keys are cluster IDs
     # and values are list of TFs.
     if are_tfs_clustered:
-        cluster_to_tfs = invert_tf_to_cluster_dict(tf_representatives, gene_to_cluster)
+        cluster_to_tfs = invert_tf_to_cluster_dict(tf_representatives, tf_to_cluster)
         [future_cluster_to_tfs] = client.scatter([cluster_to_tfs], broadcast=True)
     else:
         future_cluster_to_tfs = None
@@ -361,10 +390,13 @@ def create_graph_fdr(expression_matrix: np.ndarray,
     # Use pre-computed medoid representatives for TFs and/or non-TFs.
     if fdr_mode == 'medoid':
         # Loop over all representative targets, i.e. non-TF medoids.
-        for target_gene_index in target_gene_indices(gene_names, non_tf_representatives + tf_representatives):
+        all_targets = target_representatives
+        if target_subset is not None:
+            all_targets = target_subset
+        for target_gene_index in target_gene_indices(gene_names, all_targets):
             target_gene_name = gene_names[target_gene_index]
             target_gene_expression = delayed(expression_matrix[:, target_gene_index])
-            target_subset_grn = delayed(grn_subsets_per_target[gene_to_cluster[target_gene_name]])
+            target_subset_grn = delayed(grn_subsets_per_target[target_to_cluster[target_gene_name]])
 
             # Pass subset of GRN which is represented by the medoids.
             delayed_link_df = delayed(count_computation_medoid_representative, pure=True)(
@@ -377,7 +409,7 @@ def create_graph_fdr(expression_matrix: np.ndarray,
                 target_gene_expression,
                 target_subset_grn,
                 per_target_importance_sums,
-                future_gene_to_cluster,
+                future_tf_to_cluster,
                 future_cluster_to_tfs,
                 n_permutations,
                 early_stop_window_length,
@@ -412,7 +444,7 @@ def create_graph_fdr(expression_matrix: np.ndarray,
                 target_cluster_idxs,
                 cluster_expression,
                 target_subset_grn,
-                gene_to_cluster,
+                tf_to_cluster,
                 per_target_importance_sums,
                 n_permutations,
                 early_stop_window_length,
@@ -445,7 +477,7 @@ def count_computation_medoid_representative(
         target_gene_expression: np.ndarray,
         partial_input_grn: dict,  # {(TF, target): {'importance': float}}
         per_target_importance_sums,
-        gene_to_clust: dict[str, int],
+        tf_to_cluster: dict[str, int],
         cluster_to_tf : dict,
         n_permutations: int,
         early_stop_window_length=EARLY_STOP_WINDOW_LENGTH,
@@ -504,13 +536,13 @@ def count_computation_medoid_representative(
         if are_tfs_clustered:
             shuffled_target_sum = 0.0
             for tf, _, importance in zip(shuffled_grn_df['TF'], shuffled_grn_df['target'], shuffled_grn_df['importance']):
-                tf_cluster_size = len(cluster_to_tf[gene_to_clust[tf]])
+                tf_cluster_size = len(cluster_to_tf[tf_to_cluster[tf]])
                 shuffled_target_sum += importance * tf_cluster_size
             scaling_factor = per_target_importance_sums[target_gene_name] / shuffled_target_sum
             shuffled_grn_df['importance'] = shuffled_grn_df['importance'] * scaling_factor
 
         # Update the count values of the partial input GRN
-        count_helper(shuffled_grn_df, partial_input_grn, gene_to_clust)
+        count_helper(shuffled_grn_df, partial_input_grn, tf_to_cluster)
 
     # Change partial input GRN format from dict to df
     partial_input_grn_fdr_df = pd.DataFrame(
@@ -535,7 +567,7 @@ def count_computation_sampled_representative(
         target_gene_idxs,
         target_gene_expressions,
         partial_input_grn: dict,
-        gene_to_cluster: dict[str, int],
+        tf_to_cluster: dict[str, int],
         per_target_importance_sums : dict,
         n_permutations : int,
         early_stop_window_length=EARLY_STOP_WINDOW_LENGTH,
@@ -612,13 +644,13 @@ def count_computation_sampled_representative(
         if are_tfs_clustered:
             shuffled_target_sum = 0.0
             for tf, _, importance in zip(shuffled_grn_df['TF'], shuffled_grn_df['target'], shuffled_grn_df['importance']):
-                tf_cluster_size = len(cluster_to_tfs[gene_to_cluster[tf]])
+                tf_cluster_size = len(cluster_to_tfs[tf_to_cluster[tf]])
                 shuffled_target_sum += importance * tf_cluster_size
             scaling_factor = per_target_importance_sums[target_gene_name] / shuffled_target_sum
             shuffled_grn_df['importance'] = shuffled_grn_df['importance'] * scaling_factor
 
         # Update the count values of the partial input GRN.
-        count_helper(shuffled_grn_df, partial_input_grn, gene_to_cluster)
+        count_helper(shuffled_grn_df, partial_input_grn, tf_to_cluster)
 
     # Change partial input GRN format from dict to df
     partial_input_grn_fdr_df = pd.DataFrame(

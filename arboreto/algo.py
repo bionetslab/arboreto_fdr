@@ -11,10 +11,13 @@ import os
 def grnboost2_fdr(
         expression_data : pd.DataFrame,
         cluster_representative_mode : str,
-        num_non_tf_clusters : int = -1,
+        num_target_clusters : int = -1,
         num_tf_clusters : int = -1,
+        target_cluster_mode : str = 'wasserstein',
+        tf_cluster_mode : str = 'correlation',
         input_grn : dict = None,
         tf_names : list[str] = None,
+        target_subset : list[str] = None,
         client_or_address='local',
         early_stop_window_length=EARLY_STOP_WINDOW_LENGTH,
         seed=None,
@@ -22,17 +25,43 @@ def grnboost2_fdr(
         num_permutations=1000,
         output_dir=None
 ):
+    """
+        :param expression_data: Expression matrix as pandas dataframe with genes as columns, samples as columns.
+        :param cluster_representative_mode: How to do representatives from gene clusters ('random', 'medoid') or
+            if to use all genes for full FDR ('all_genes').
+        :param num_target_clusters: Number of clusters for target genes.
+        :param num_tf_clusters: Number of clusters for TFs.
+        :param target_cluster_mode: How to cluster targets, can be one of 'wasserstein', 'kmeans'.
+        :param tf_cluster_mode: How to cluster TFs, can be one of 'correlation', 'wasserstein'.
+        :param input_grn: Optional. If an input GRN to perform FDR control on is given, pass this here as dataframe
+            with columns 'TF', 'target', 'importance'.
+        :param target_subset: Subset of target genes to perform FDR control on.
+        :param tf_names: optional list of transcription factors. If None or 'all', the list of gene_names will be used.
+        :param client_or_address: one of:
+           * None or 'local': a new Client(LocalCluster()) will be used to perform the computation.
+           * string address: a new Client(address) will be used to perform the computation.
+           * a Client instance: the specified Client instance will be used to perform the computation.
+        :param early_stop_window_length: early stop window length. Default 25.
+        :param seed: optional random seed for the regressors. Default None.
+        :param verbose: print info.
+        :param num_permutations: Number of permutations to run for empirical P-value computation.
+        :param output_dir: Directory where to write intermediate results to.
+        :return: a pandas DataFrame['TF', 'target', 'importance', 'pvalue'] representing the FDR-controlled gene regulatory links.
+    """
     if cluster_representative_mode not in {'medoid', 'random', 'all_genes'}:
         raise ValueError('cluster_representative_mode must be one of "medoid", "random", "all_genes"')
 
-    if num_non_tf_clusters==-1 and num_tf_clusters==-1 and not cluster_representative_mode == "all_genes":
+    if target_subset is not None and cluster_representative_mode != 'all_genes':
+        raise ValueError("Target subset is given, but is only compatible with all_genes FDR mode.")
+
+    if num_target_clusters==-1 and num_tf_clusters==-1 and not cluster_representative_mode == "all_genes":
         print("No cluster numbers given, running full FDR mode...")
         cluster_representative_mode="all_genes"
 
     if verbose and num_tf_clusters == -1:
         print("running FDR without TF clustering")
 
-    if verbose and num_non_tf_clusters == -1:
+    if verbose and num_target_clusters == -1:
         print("running FDR without non-TF clustering")
 
     if output_dir is not None:
@@ -46,7 +75,8 @@ def grnboost2_fdr(
         input_grn = grnboost2(
             expression_data=expression_data,
             tf_names=tf_names,
-            client_or_address=client_or_address
+            client_or_address=client_or_address,
+            seed=seed
         )
 
     # Align the input GRN and expression data w.r.t. the genes
@@ -71,10 +101,13 @@ def grnboost2_fdr(
     return perform_fdr(
         expression_data_aligned,
         input_grn_dict,
-        num_non_tf_clusters,
+        num_target_clusters,
         num_tf_clusters,
         cluster_representative_mode,
+        target_cluster_mode,
+        tf_cluster_mode,
         tf_names_input_grn,
+        target_subset,
         client_or_address,
         early_stop_window_length,
         seed,

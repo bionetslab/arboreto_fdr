@@ -5,6 +5,9 @@ import numpy as np
 from numba import njit, prange, set_num_threads, types
 from sklearn.cluster import AgglomerativeClustering
 from distributed import Client, LocalCluster
+from sklearn.decomposition import PCA
+from sklearn.cluster import KMeans
+from sklearn_extra.cluster import KMedoids
 
 @njit(nopython=True, nogil=True)
 def _merge_sorted_arrays(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -85,23 +88,47 @@ def compute_wasserstein_distance_matrix(expression_mat: pd.DataFrame, num_thread
     distance_mat = pd.DataFrame(distance_mat, columns=expression_mat.columns)
     return distance_mat
 
+def compute_correlation_distance_matrix(exp_matrix : pd.DataFrame):
+    corr_matrix = np.corrcoef(exp_matrix.to_numpy(), rowvar=False)
+    scaled_corr_matrix = (corr_matrix+1.0) / 2.0
+    distance_mat = 1.0 - scaled_corr_matrix
+    distance_df = pd.DataFrame(distance_mat, columns=exp_matrix.columns)
+    return distance_df
 
-def cluster_genes_to_dict(distance_matrix : pd.DataFrame, num_clusters : int = 100) -> dict[str, int]:
+def cluster_genes_to_dict(input_matrix : pd.DataFrame, num_clusters : int, mode : str):
     """
     Perform agglomerative clustering on a precomputed distance matrix and return gene-to-cluster mappings.
 
-    :param distance_matrix: a symmetric pandas DataFrame representing pairwise distances between genes.
-                            It is assumed to be precomputed (e.g., Wasserstein distances).
+    :param input_matrix: either a symmetric pandas DataFrame representing pairwise distances between genes,
+                         or the full expression matrix in case of KMeans based clustering.
     :param num_clusters: the number of clusters to form.
     :return: a dictionary mapping gene names (column names in the distance matrix) to cluster IDs.
     """
     # Create clusters.
-    agg_clustering = AgglomerativeClustering(n_clusters=num_clusters, metric='precomputed', linkage='complete')
-    cluster_labels = agg_clustering.fit_predict(distance_matrix.to_numpy())
-    # Map clustering output to dictionary representation.
-    gene_names = distance_matrix.columns.to_list()
-    gene_to_cluster = {name : id for name, id in zip(gene_names, cluster_labels)}
-    return gene_to_cluster
+    if mode=='distance':
+        agg_clustering = AgglomerativeClustering(n_clusters=num_clusters, metric='precomputed', linkage='complete')
+        cluster_labels = agg_clustering.fit_predict(input_matrix.to_numpy())
+        # Map clustering output to dictionary representation.
+        gene_names = input_matrix.columns.to_list()
+        gene_to_cluster = {name : id for name, id in zip(gene_names, cluster_labels)}
+        return gene_to_cluster, []
+    elif mode=='kmeans':
+        num_samples = len(input_matrix.index)
+        # Perform PCA on columns of expression matrix.
+        input_matrix_transp = input_matrix.T.copy()
+        pca = PCA(n_components=min(50, num_samples))
+        pca_result = pca.fit_transform(input_matrix_transp)
+        # Run K-Medoids clustering on PCA-reduced data
+        kmedoids = KMedoids(n_clusters=num_clusters, random_state=42)
+        kmedoids.fit(pca_result)
+        cluster_labels = kmedoids.labels_
+        gene_to_cluster = {gene : cluster for gene, cluster in zip(input_matrix.columns, cluster_labels)}
+        gene_list = input_matrix.columns.to_list()
+        medoids = [gene_list[i] for i in list(kmedoids.medoid_indices_)]
+        return gene_to_cluster, medoids
+    else:
+        print("Cluster_genes_to_dict: unknown clustering mode...")
+        return None
 
 def merge_gene_clusterings(clustering1 : dict, clustering2 : dict):
     num_clusters1 = max({clusterID for _, clusterID in clustering1.items()})+1
@@ -170,7 +197,7 @@ def subset_tf_matrix(tf_matrix : np.ndarray,
 def count_helper(
         shuffled_grn: pd.DataFrame,
         partial_input_grn: dict[str, dict[str, float]],
-        gene_to_clust: dict[str, int],
+        tf_to_cluster: dict[str, int],
 ) -> None:
     """
     Computes empirical counts for all edges in input GRN based on given decoy edges.
@@ -187,13 +214,13 @@ def count_helper(
     # TFs have not been clustered (i.e. each TF has one dummy cluster) or if TFs have been clustered, then
     # each TF cluster has exactly one representative and hence can only appear once in shuffled output GRN.
     shuffled_grn_tf_cluster_to_importance = {
-        gene_to_clust[tf]: imp for tf, imp in zip(shuffled_grn['TF'], shuffled_grn['importance'])
+        tf_to_cluster[tf]: imp for tf, imp in zip(shuffled_grn['TF'], shuffled_grn['importance'])
     }
 
     for (tf, _), val in partial_input_grn.items():
-        if gene_to_clust[tf] in shuffled_grn_tf_cluster_to_importance:
+        if tf_to_cluster[tf] in shuffled_grn_tf_cluster_to_importance:
             importance_input = val['importance']
-            importance_shuffled = shuffled_grn_tf_cluster_to_importance[gene_to_clust[tf]]
+            importance_shuffled = shuffled_grn_tf_cluster_to_importance[tf_to_cluster[tf]]
 
             if importance_shuffled >= importance_input:
                 val['count'] += 1
