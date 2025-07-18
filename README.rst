@@ -69,7 +69,25 @@ Arboreto was conceived with the working bioinformatician or data scientist in mi
 FDR control
 *******
 
-TODO
+We provide an efficient FDR control implementation based on GRNBoost2, which computes empirical P-values for each edge in a given or to-be-inferred GRN. Our implementation offers both a full and a (more efficient) approximate way of P-value computation. An example call to our FDR control includes the following steps:
+
+.. code-block:: python
+
+    import pandas as pd
+    from arboreto.algo import grnboost2_fdr
+
+    # Load expression matrix - in this case simulate one.
+    exp_data = np.random.randn(100, 10)
+    exp_df = pd.DataFrame(data, columns=columns)
+
+    # Run approximate FDR control.
+    fdr_grn = grnboost2_fdr(
+                expression_data=exp_df,
+                cluster_representative_mode="random",
+                num_target_clusters=5,
+                num_tf_clusters=-1
+            )
+
 
 License
 *******
