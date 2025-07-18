@@ -88,6 +88,7 @@ We provide an efficient FDR control implementation based on GRNBoost2, which com
                 num_tf_clusters=-1
             )
 
+A more detailed description of all parameters of the `grnboost2_fdr` function can be found in the respective docstring.
 
 License
 *******
