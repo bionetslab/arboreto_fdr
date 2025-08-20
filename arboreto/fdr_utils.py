@@ -111,7 +111,8 @@ def cluster_genes_to_dict(input_matrix : pd.DataFrame, num_clusters : int, mode 
         # Map clustering output to dictionary representation.
         gene_names = input_matrix.columns.to_list()
         gene_to_cluster = {name : id for name, id in zip(gene_names, cluster_labels)}
-        return gene_to_cluster, []
+        medoids = compute_medoids(gene_to_cluster, input_matrix)
+        return gene_to_cluster, medoids
     elif mode=='kmeans':
         num_samples = len(input_matrix.index)
         # Perform PCA on columns of expression matrix.
@@ -198,6 +199,7 @@ def count_helper(
         shuffled_grn: pd.DataFrame,
         partial_input_grn: dict[str, dict[str, float]],
         tf_to_cluster: dict[str, int],
+        scale_for_tf_sampling : bool
 ) -> None:
     """
     Computes empirical counts for all edges in input GRN based on given decoy edges.
@@ -221,7 +223,8 @@ def count_helper(
         if tf_to_cluster[tf] in shuffled_grn_tf_cluster_to_importance:
             importance_input = val['importance']
             importance_shuffled = shuffled_grn_tf_cluster_to_importance[tf_to_cluster[tf]]
-
+            if scale_for_tf_sampling:
+                val['shuffled_occurences'] += 1
             if importance_shuffled >= importance_input:
                 val['count'] += 1
 

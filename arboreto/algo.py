@@ -23,24 +23,21 @@ def grnboost2_fdr(
         seed=None,
         verbose=False,
         num_permutations=1000,
-        output_dir=None
+        output_dir=None,
+        scale_for_tf_sampling : bool = False
 ):
     """
         :param expression_data: Expression matrix as pandas dataframe with genes as columns, samples as columns.
-        :param cluster_representative_mode: How to draw representatives from gene clusters, either randomly ('random'),
-            or always take medoid of cluster ('medoid'). In case of full FDR, i.e. without using gene clusters, use
-            mode 'all_genes'.
-        :param num_target_clusters: Number of clusters for target genes; set to -1 if no clustering desired.
-        :param num_tf_clusters: Number of clusters for TFs; set to -1 if no clustering is desired.
-        :param target_cluster_mode: How to cluster targets, either based on Wasserstein distance('wasserstein'),
-            or using KMedoids clustering on PCAs of expression matrix ('kmeans').
-        :param tf_cluster_mode: How to cluster TFs, either by using Pearson correlation as distance ('correlation'),
-            or using Wasserstein distance ('wasserstein').
+        :param cluster_representative_mode: How to do representatives from gene clusters ('random', 'medoid') or
+            if to use all genes for full FDR ('all_genes').
+        :param num_target_clusters: Number of clusters for target genes.
+        :param num_tf_clusters: Number of clusters for TFs.
+        :param target_cluster_mode: How to cluster targets, can be one of 'wasserstein', 'kmeans'.
+        :param tf_cluster_mode: How to cluster TFs, can be one of 'correlation', 'wasserstein'.
         :param input_grn: Optional. If an input GRN to perform FDR control on is given, pass this here as dataframe
             with columns 'TF', 'target', 'importance'.
         :param target_subset: Subset of target genes to perform FDR control on.
-        :param tf_names: Optional list of transcription factors only used for input GRN inference.
-            If None or 'all', the list of gene_names will be used.
+        :param tf_names: optional list of transcription factors. If None or 'all', the list of gene_names will be used.
         :param client_or_address: one of:
            * None or 'local': a new Client(LocalCluster()) will be used to perform the computation.
            * string address: a new Client(address) will be used to perform the computation.
@@ -117,7 +114,8 @@ def grnboost2_fdr(
         seed,
         verbose,
         num_permutations,
-        output_dir
+        output_dir,
+        scale_for_tf_sampling
     )
 
 

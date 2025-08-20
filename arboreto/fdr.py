@@ -10,7 +10,7 @@ from dask.dataframe.utils import make_meta
 import pickle
 import os
 
-FDR_GRN_SCHEMA = make_meta({'TF': str, 'target': str, 'importance': float, 'count' : float})
+FDR_GRN_SCHEMA = make_meta({'TF': str, 'target': str, 'importance': float, 'count' : float, 'shuffled_occurences' : float})
 
 def perform_fdr(
         expression_data : pd.DataFrame,
@@ -27,7 +27,8 @@ def perform_fdr(
         seed,
         verbose,
         num_permutations,
-        output_dir
+        output_dir,
+        scale_for_tf_sampling
 ):
     # Extract TF name and non-TF name lists from expression matrix object.
     expression_matrix, gene_names, tf_names = _prepare_input(expression_data, None, tf_names)
@@ -116,11 +117,14 @@ def perform_fdr(
                    seed=seed,
                    verbose=verbose,
                    n_permutations=num_permutations,
-                   output_dir=output_dir
+                   output_dir=output_dir,
+                   scale_for_tf_sampling=scale_for_tf_sampling
                    )
     # Transform counts into P-values and remove count column.
     fdr_controlled_df['pvalue'] = (fdr_controlled_df['count']+1)/(num_permutations+1)
-    fdr_controlled_df.drop(columns=['count'], inplace=True)
+    if not scale_for_tf_sampling:
+        fdr_controlled_df.drop(columns=['count'], inplace=True)
+        fdr_controlled_df.drop(columns=['shuffled_occurences'], inplace=True)
     return fdr_controlled_df
 
 
@@ -135,13 +139,14 @@ def diy_fdr(expression_data,
             tf_to_cluster,
             target_to_cluster,
             input_grn,
+            scale_for_tf_sampling,
             gene_names=None,
             client_or_address='local',
             early_stop_window_length=None,
             seed=None,
             verbose=False,
             n_permutations=1000,
-            output_dir=None
+            output_dir=None,
             ):
     """
     :param are_tfs_clustered: True if TFs have also been clustered for FDR control.
@@ -215,7 +220,8 @@ def diy_fdr(expression_data,
                                  early_stop_window_length=early_stop_window_length,
                                  seed=seed,
                                  n_permutations=n_permutations,
-                                 output_dir=output_dir)
+                                 output_dir=output_dir,
+                                 scale_for_tf_sampling=scale_for_tf_sampling)
 
         if verbose:
             print('{} partitions'.format(graph.npartitions))
@@ -245,6 +251,7 @@ def create_graph_fdr(expression_matrix: np.ndarray,
                      regressor_type,
                      regressor_kwargs,
                      client,
+                     scale_for_tf_sampling,
                      early_stop_window_length=EARLY_STOP_WINDOW_LENGTH,
                      repartition_multiplier=1,
                      seed=DEMON_SEED,
@@ -414,7 +421,8 @@ def create_graph_fdr(expression_matrix: np.ndarray,
                 n_permutations,
                 early_stop_window_length,
                 seed,
-                output_dir
+                output_dir,
+                scale_for_tf_sampling
             )
 
             if delayed_link_df is not None:
@@ -450,6 +458,7 @@ def create_graph_fdr(expression_matrix: np.ndarray,
                 early_stop_window_length,
                 seed,
                 output_dir,
+                scale_for_tf_sampling
             )
 
 
@@ -482,7 +491,8 @@ def count_computation_medoid_representative(
         n_permutations: int,
         early_stop_window_length=EARLY_STOP_WINDOW_LENGTH,
         seed=DEMON_SEED,
-        output_dir=None
+        output_dir=None,
+        scale_for_tf_sampling=False
 ):
 
     partial_input_grn = copy.deepcopy(partial_input_grn)
@@ -501,6 +511,7 @@ def count_computation_medoid_representative(
     # Initialize counts
     for _, val in partial_input_grn.items():
         val.update({'count': 0.0})
+        val.update({'shuffled_occurences': 0})
 
     # Iterate for num permutations
     for i in range(n_permutations):
@@ -542,12 +553,12 @@ def count_computation_medoid_representative(
             shuffled_grn_df['importance'] = shuffled_grn_df['importance'] * scaling_factor
 
         # Update the count values of the partial input GRN
-        count_helper(shuffled_grn_df, partial_input_grn, tf_to_cluster)
+        count_helper(shuffled_grn_df, partial_input_grn, tf_to_cluster, scale_for_tf_sampling)
 
     # Change partial input GRN format from dict to df
     partial_input_grn_fdr_df = pd.DataFrame(
-        [(TF, target, v['importance'], v['count']) for (TF, target), v in partial_input_grn.items()],
-        columns=['TF', 'target', 'importance', 'count']
+        [(TF, target, v['importance'], v['count'], v['shuffled_occurences']) for (TF, target), v in partial_input_grn.items()],
+        columns=['TF', 'target', 'importance', 'count', 'shuffled_occurences']
     )
 
     if not output_dir is None:
@@ -572,8 +583,8 @@ def count_computation_sampled_representative(
         n_permutations : int,
         early_stop_window_length=EARLY_STOP_WINDOW_LENGTH,
         seed=DEMON_SEED,
-        output_dir=None
-
+        output_dir=None,
+        scale_for_tf_sampling=False
 ):
 
     partial_input_grn = copy.deepcopy(partial_input_grn)
@@ -582,6 +593,7 @@ def count_computation_sampled_representative(
     # Initialize counts on input GRN edges.
     for _, val in partial_input_grn.items():
         val.update({'count': 0.0})
+        val.update({'shuffled_occurences': 0})
 
     for perm in range(n_permutations):
         # Retrieve "random" target gene from cluster.
@@ -650,12 +662,12 @@ def count_computation_sampled_representative(
             shuffled_grn_df['importance'] = shuffled_grn_df['importance'] * scaling_factor
 
         # Update the count values of the partial input GRN.
-        count_helper(shuffled_grn_df, partial_input_grn, tf_to_cluster)
+        count_helper(shuffled_grn_df, partial_input_grn, tf_to_cluster, scale_for_tf_sampling)
 
     # Change partial input GRN format from dict to df
     partial_input_grn_fdr_df = pd.DataFrame(
-        [(TF, target, v['importance'], v['count']) for (TF, target), v in partial_input_grn.items()],
-        columns=['TF', 'target', 'importance', 'count']
+        [(TF, target, v['importance'], v['count'], v['shuffled_occurences']) for (TF, target), v in partial_input_grn.items()],
+        columns=['TF', 'target', 'importance', 'count', 'shuffled_occurences']
     )
 
     if not output_dir is None:
