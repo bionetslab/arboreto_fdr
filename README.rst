@@ -71,21 +71,21 @@ Quick install
 
 The tool is installable via pip and pixi
 
-.. code-block:: shell
+.. code-block:: bash
     git clone git@github.com:bionetslab/arboreto_fdr.git
     cd arboreto_fdr
     pip install -e .
 
 To create a pixi environment, download pixi from pixi.sh, install and run 
 
-.. code-block:: shell
+.. code-block:: bash
     git clone git@github.com:bionetslab/arboreto_fdr.git
     cd arboreto_fdr
     pixi install
 
 Create jupyter kernel using pixi.toml/pyproject.toml, which will install a jupyter kernel using a custom environment (including ipython)
 
-.. code-block::shell
+.. code-block:: bash
     git clone git@github.com:bionetslab/arboreto_fdr.git
     cd arboreto_fdr
     pixi run -e kernel install-kernel
