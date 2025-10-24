@@ -1,16 +1,20 @@
 """
 Core functional building blocks, composed in a Dask graph for distributed computation.
 """
+from random import random
 
 import numpy as np
 import pandas as pd
 import logging
 
 import scipy
+from requests.packages import target
 from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor, ExtraTreesRegressor
 from dask import delayed
 from dask.dataframe import from_delayed
 from dask.dataframe.utils import make_meta
+from xgboost import XGBRegressor
+from sklearn.linear_model import Lasso
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +57,19 @@ SGBM_KWARGS = {
     'subsample': 0.9
 }
 
+XGB_KWARGS = {
+    'learning_rate': 0.01,
+    'n_estimators': 1000,
+    'max_depth': 5,
+    'subsample': 0.9,
+    'colsample_bytree': 0.7,
+    'tree_method': 'hist',
+    'n_jobs': 1
+}
+
+LASSO_KWARGS = {
+    'alpha' : 0.01
+}
 
 def is_sklearn_regressor(regressor_type):
     """
@@ -69,6 +86,8 @@ def is_xgboost_regressor(regressor_type):
     """
     return regressor_type.upper() == 'XGB'
 
+def is_lasso_regressor(regressor_type):
+    return regressor_type.upper() == "LASSO"
 
 def is_oob_heuristic_supported(regressor_type, regressor_kwargs):
     """
@@ -139,10 +158,31 @@ def fit_model(regressor_type,
 
         return regressor
 
+    def do_xgboost_regression():
+        # Ensure parameters include the random seed.
+
+        regressor = XGBRegressor(
+            objective="reg:squarederror",  # or another objective
+            random_state=seed,
+            **regressor_kwargs
+        )
+
+        regressor.fit(tf_matrix, target_gene_expression)
+
+        return regressor
+
+    def do_lasso_regression():
+        regressor = Lasso(**regressor_kwargs, random_state=seed)
+        regressor.fit(tf_matrix, target_gene_expression)
+        print(tf_matrix, target_gene_expression)
+        return regressor
+
     if is_sklearn_regressor(regressor_type):
         return do_sklearn_regression()
-    # elif is_xgboost_regressor(regressor_type):
-    #     raise ValueError('XGB regressor not yet supported')
+    elif is_xgboost_regressor(regressor_type):
+        return do_xgboost_regression()
+    elif is_lasso_regressor(regressor_type):
+        return do_lasso_regression()
     else:
         raise ValueError('Unsupported regressor type: {0}'.format(regressor_type))
 
@@ -168,6 +208,21 @@ def to_feature_importances(regressor_type,
         denormalized_importances = trained_regressor.feature_importances_ * n_estimators
 
         return denormalized_importances
+    elif is_xgboost_regressor(regressor_type):
+        # Get raw importance dictionary {feature_name: importance}.
+        booster = trained_regressor.get_booster()
+        importance_dict = booster.get_score(importance_type='gain')
+        # Convert to array sorted by feature index.
+        n_features = trained_regressor.n_features_in_
+        importances = np.zeros(n_features)
+        for k, v in importance_dict.items():
+            idx = int(k[1:])
+            importances[idx] = v
+        return importances
+    elif is_lasso_regressor(regressor_type):
+        scores = np.abs(trained_regressor.coef_)
+        print(scores)
+        return scores
     else:
         return trained_regressor.feature_importances_
 
@@ -213,7 +268,9 @@ def to_links_df(regressor_type,
     if is_sklearn_regressor(regressor_type):
         return pythonic()
     elif is_xgboost_regressor(regressor_type):
-        raise ValueError('XGB regressor not yet supported')
+        return pythonic()
+    elif is_lasso_regressor(regressor_type):
+        return pythonic()
     else:
         raise ValueError('Unsupported regressor type: ' + regressor_type)
 

@@ -1,6 +1,7 @@
 
 import copy
-from arboreto.core import EARLY_STOP_WINDOW_LENGTH, SGBM_KWARGS, DEMON_SEED, to_tf_matrix, target_gene_indices, clean, fit_model, to_links_df
+from arboreto.core import EARLY_STOP_WINDOW_LENGTH, SGBM_KWARGS, DEMON_SEED, to_tf_matrix, target_gene_indices, clean, \
+    fit_model, to_links_df, RF_KWARGS, ET_KWARGS, XGB_KWARGS, LASSO_KWARGS
 from arboreto.fdr_utils import compute_correlation_distance_matrix, compute_wasserstein_distance_matrix, cluster_genes_to_dict, merge_gene_clusterings, compute_medoids, partition_input_grn, invert_tf_to_cluster_dict, count_helper, subset_tf_matrix, _prepare_client, _prepare_input
 import numpy as np
 import pandas as pd
@@ -28,7 +29,8 @@ def perform_fdr(
         verbose,
         num_permutations,
         output_dir,
-        scale_for_tf_sampling
+        scale_for_tf_sampling,
+        regressor_type
 ):
     # Extract TF name and non-TF name lists from expression matrix object.
     expression_matrix, gene_names, tf_names = _prepare_input(expression_data, None, tf_names)
@@ -101,9 +103,22 @@ def perform_fdr(
         with open(os.path.join(output_dir, 'target_medoids.pkl'), 'wb') as f:
             pickle.dump(target_representatives, f)
 
+    if regressor_type == "GBM":
+        regressor_args = SGBM_KWARGS
+    elif regressor_type == "RF":
+        regressor_args = RF_KWARGS
+    elif regressor_type == "ET":
+        regressor_args = ET_KWARGS
+    elif regressor_type == "XGB":
+        regressor_args = XGB_KWARGS
+    elif regressor_type == "LASSO":
+        regressor_args = LASSO_KWARGS
+    else:
+        raise ValueError(f"Unknown regressor type: {regressor_type}")
+
     fdr_controlled_df = diy_fdr(expression_data=expression_data,
-                   regressor_type='GBM',
-                   regressor_kwargs=SGBM_KWARGS,
+                   regressor_type=regressor_type,
+                   regressor_kwargs=regressor_args,
                    gene_names=gene_names,
                    are_tfs_clustered=are_tfs_clustered,
                    tf_representatives=tf_representatives,
@@ -159,7 +174,7 @@ def diy_fdr(expression_data,
            * a pandas DataFrame (rows=observations, columns=genes)
            * a dense 2D numpy.ndarray
            * a sparse scipy.sparse.csc_matrix
-    :param regressor_type: string. One of: 'RF', 'GBM', 'ET'. Case insensitive.
+    :param regressor_type: string. One of: 'RF', 'GBM', 'ET', 'XGB'. Case insensitive.
     :param regressor_kwargs: a dictionary of key-value pairs that configures the regressor.
     :param gene_names: optional list of gene names (strings). Required when a (dense or sparse) matrix is passed as
                        'expression_data' instead of a DataFrame.
